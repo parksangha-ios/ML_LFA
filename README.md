@@ -73,3 +73,15 @@ uv run python goal2_visualize.py   --history history_mtl_heatloss.json   --repor
 2. 실제 Cowan/Cape 해석식/수치해석 데이터 생성기로 교체
 3. 실험 raw 시계열(장비/시편별)로 파인튜닝 + 외부 검증셋 분리
 4. 논문 지표: per-material, per-thickness, per-temperature stratified error 보고
+
+
+## 보정식 모듈화 (Cowan/Cape-Lehman/Clark-Taylor)
+
+- `lfa_corrections.py`
+  - `parker_alpha()` : 확정 Parker 식
+  - `RatioCorrection` : 방법별 보정 함수를 다항식 형태로 주입하는 공통 인터페이스
+- `LFA_FORMULA_RESEARCH_NOTES.md`
+  - Goal2 지표 해석, 보정식 구조, 장비(LFA 467) 반영 원칙 정리
+
+주의: Cowan/Cape-Lehman/Clark-Taylor의 수치 계수는 사용 표준/장비 구현에 따라 달라질 수 있으므로,
+반드시 선택한 원문/장비 문서 기준으로 확정 후 주입하세요.
