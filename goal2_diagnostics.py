@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 from sklearn.decomposition import PCA
 from sklearn.metrics import accuracy_score, confusion_matrix, f1_score
@@ -12,22 +13,6 @@ from sklearn.preprocessing import StandardScaler
 from torch.utils.data import DataLoader, random_split
 
 from mtl_heatloss_pytorch import LFAMTLDataset, LFAMTLNet, SEED, SynthConfig, make_dataset
-
-
-@dataclass
-class DiagnosticSummary:
-    class_counts: dict
-    class_balance_ratio: float
-    alpha_hist_cv: float
-    l_hist_cv: float
-    sample_feature_ratio: float
-    pca_dim_95: int
-    effective_rank: float
-    val_acc: float
-    val_macro_f1: float
-    alpha_mape_mean: float
-    alpha_mape_median: float
-    alpha_mape_p90: float
 
 
 def _coefficient_of_variation(x: np.ndarray) -> float:
@@ -70,10 +55,15 @@ def data_balance_and_dimensionality(data: dict[str, np.ndarray], n_bins: int = 1
     }
 
 
-def evaluate_model(data: dict[str, np.ndarray], ckpt: str, n_points: int, train_ratio: float = 0.8):
+def evaluate_model(
+    data: dict[str, np.ndarray],
+    ckpt: str,
+    n_points: int,
+    train_ratio: float = 0.8,
+):
     ds = LFAMTLDataset(data)
     n_train = int(len(ds) * train_ratio)
-    train_ds, val_ds = random_split(ds, [n_train, len(ds) - n_train], generator=torch.Generator().manual_seed(SEED))
+    _, val_ds = random_split(ds, [n_train, len(ds) - n_train], generator=torch.Generator().manual_seed(SEED))
 
     val_loader = DataLoader(val_ds, batch_size=512, shuffle=False, num_workers=0)
 
@@ -93,9 +83,8 @@ def evaluate_model(data: dict[str, np.ndarray], ckpt: str, n_points: int, train_
 
             ys.append(batch["curve_type"].cpu().numpy())
             ps.append(pred_cls)
-
-            alpha_true_log.append(batch["alpha_log"].cpu().numpy())
-            alpha_pred_log.append(out["alpha_log"].cpu().numpy())
+            alpha_true_log.append(batch["alpha_log"].cpu().numpy().reshape(-1))
+            alpha_pred_log.append(out["alpha_log"].cpu().numpy().reshape(-1))
 
     y_true = np.concatenate(ys)
     y_pred = np.concatenate(ps)
@@ -107,7 +96,24 @@ def evaluate_model(data: dict[str, np.ndarray], ckpt: str, n_points: int, train_
     p = 10 ** p_log
     mape = np.abs(p - t) / np.maximum(t, 1e-12)
 
-    return {
+    per_class_mape = {}
+    for cls_id in [0, 1, 2]:
+        mask = y_true == cls_id
+        per_class_mape[f"class_{cls_id}_alpha_mape_mean"] = float(np.mean(mape[mask])) if np.any(mask) else None
+
+    details = pd.DataFrame(
+        {
+            "y_true": y_true,
+            "y_pred": y_pred,
+            "alpha_true_log": t_log,
+            "alpha_pred_log": p_log,
+            "alpha_true": t,
+            "alpha_pred": p,
+            "alpha_abs_rel_err": mape,
+        }
+    )
+
+    report = {
         "val_acc": float(accuracy_score(y_true, y_pred)),
         "val_macro_f1": float(f1_score(y_true, y_pred, average="macro")),
         "confusion_matrix": cm.tolist(),
@@ -115,6 +121,8 @@ def evaluate_model(data: dict[str, np.ndarray], ckpt: str, n_points: int, train_
         "alpha_mape_median": float(np.median(mape)),
         "alpha_mape_p90": float(np.quantile(mape, 0.9)),
     }
+    report.update(per_class_mape)
+    return report, details
 
 
 def main() -> None:
@@ -123,6 +131,7 @@ def main() -> None:
     parser.add_argument("--n-points", type=int, default=128)
     parser.add_argument("--checkpoint", type=str, default="best_mtl_heatloss.pt")
     parser.add_argument("--output", type=str, default="goal2_diagnostic_report.json")
+    parser.add_argument("--pred-output", type=str, default="goal2_predictions.csv")
     args, _unknown = parser.parse_known_args()
 
     cfg = SynthConfig(n_samples=args.n_samples, n_points=args.n_points)
@@ -130,13 +139,15 @@ def main() -> None:
 
     report = {}
     report.update(data_balance_and_dimensionality(data))
-    report.update(evaluate_model(data, args.checkpoint, n_points=args.n_points))
+    score_report, pred_df = evaluate_model(data, args.checkpoint, n_points=args.n_points)
+    report.update(score_report)
 
-    with open(args.output, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
+    Path(args.output).write_text(json.dumps(report, indent=2), encoding="utf-8")
+    pred_df.to_csv(args.pred_output, index=False)
 
     print(json.dumps(report, indent=2))
     print(f"saved report: {args.output}")
+    print(f"saved predictions: {args.pred_output}")
 
 
 if __name__ == "__main__":

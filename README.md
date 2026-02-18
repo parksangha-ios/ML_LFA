@@ -52,6 +52,20 @@ uv run python goal2_diagnostics.py --n-samples 6000 --n-points 128 --checkpoint 
 ```
 
 결과는 `goal2_diagnostic_report.json`로 저장됩니다.
+예측 상세는 `goal2_predictions.csv`로 저장됩니다.
+
+
+### 시각화 리포트 생성
+
+```bash
+uv run python goal2_visualize.py   --history history_mtl_heatloss.json   --report goal2_diagnostic_report.json   --pred goal2_predictions.csv   --out-dir artifacts
+```
+
+생성 파일:
+- `artifacts/goal2_history_curves.png`
+- `artifacts/goal2_confusion_matrix.png`
+- `artifacts/goal2_alpha_error_hist.png`
+- `artifacts/goal2_alpha_scatter.png`
 
 ## 연구 단계 권장 로드맵
 
