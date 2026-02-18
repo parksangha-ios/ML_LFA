@@ -1,0 +1,38 @@
+{
+  "class_counts": {
+    "0": 2000,
+    "1": 2000,
+    "2": 2000
+  },
+  "class_balance_ratio": 1.0,
+  "alpha_hist_cv": 0.04589843860815592,
+  "l_hist_cv": 0.9052649704184202,
+  "sample_feature_ratio": 23.346303501945524,
+  "pca_dim_95": 3,
+  "effective_rank": 13.244318008422852,
+  "val_acc": 1.0,
+  "val_macro_f1": 1.0,
+  "confusion_matrix": [
+    [
+      403,
+      0,
+      0
+    ],
+    [
+      0,
+      390,
+      0
+    ],
+    [
+      0,
+      0,
+      407
+    ]
+  ],
+  "alpha_mape_mean": 0.1902523934841156,
+  "alpha_mape_median": 0.15386195480823517,
+  "alpha_mape_p90": 0.4089501202106476,
+  "class_0_alpha_mape_mean": 0.20896528661251068,
+  "class_1_alpha_mape_mean": 0.16270293295383453,
+  "class_2_alpha_mape_mean": 0.19812214374542236
+}
