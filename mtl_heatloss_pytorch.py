@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -27,7 +29,6 @@ class SynthConfig:
 
 
 def parker_theta(tau: np.ndarray, n_terms: int = 120) -> np.ndarray:
-    # Parker: theta = 1 - (8/pi^2) * sum_{m=0}^inf exp(-(2m+1)^2*pi^2*tau)/(2m+1)^2
     m = np.arange(n_terms, dtype=np.float64)[:, None]
     n = 2.0 * m + 1.0
     expo = np.exp(-(n**2) * (math.pi**2) * tau[None, :])
@@ -46,7 +47,6 @@ def finite_pulse_convolution(theta: np.ndarray, pulse_steps: int) -> np.ndarray:
 def build_single_curve(curve_type: int, tau: np.ndarray) -> tuple[np.ndarray, float]:
     """
     curve_type: 0=Parker, 1=Cowan-like(loss), 2=Cape-Lehman-like(finite pulse + loss)
-    returns: normalized V, loss_strength target
     """
     base = parker_theta(tau)
 
@@ -54,17 +54,14 @@ def build_single_curve(curve_type: int, tau: np.ndarray) -> tuple[np.ndarray, fl
         loss_strength = 0.0
         out = base
     elif curve_type == 1:
-        # Cowan류: 후반부 감쇠가 stronger 하도록 지수 감쇠 적용
         loss_strength = float(rng.uniform(0.12, 1.5))
         out = base * np.exp(-loss_strength * tau)
     else:
-        # Cape-Lehman류: finite pulse + mild heat loss
         pulse_steps = int(rng.integers(3, 14))
         loss_strength = float(rng.uniform(0.05, 1.0))
         pulse_blur = finite_pulse_convolution(base, pulse_steps=pulse_steps)
         out = pulse_blur * np.exp(-loss_strength * tau)
 
-    # measurement-like perturbation
     noise = rng.normal(0.0, 0.004, size=tau.shape[0])
     out = np.clip(out + noise, 0.0, None)
 
@@ -84,16 +81,18 @@ def make_dataset(cfg: SynthConfig) -> dict[str, np.ndarray]:
     y_alpha_log = np.zeros((cfg.n_samples, 1), dtype=np.float32)
     y_loss = np.zeros((cfg.n_samples, 1), dtype=np.float32)
 
+    # 클래스 균형 샘플링: 0/1/2를 순환 배치
+    curve_types = np.arange(cfg.n_samples, dtype=np.int64) % 3
+    rng.shuffle(curve_types)
+
     for i in range(cfg.n_samples):
-        curve_type = int(rng.integers(0, 3))
+        curve_type = int(curve_types[i])
 
         alpha_log = float(rng.uniform(math.log10(cfg.alpha_min), math.log10(cfg.alpha_max)))
         alpha = 10.0 ** alpha_log
         l_mm = float(rng.uniform(cfg.l_min, cfg.l_max))
 
         v, loss_strength = build_single_curve(curve_type=curve_type, tau=tau)
-
-        # t = tau * L^2 / alpha (unit-consistent in mm^2/s)
         t = tau * (l_mm**2) / alpha
         t = np.maximum(t, 1e-12)
         t_log = np.log10(t)
@@ -101,7 +100,6 @@ def make_dataset(cfg: SynthConfig) -> dict[str, np.ndarray]:
         xs_v[i] = v
         xs_tlog[i] = t_log.astype(np.float32)
         xs_l[i, 0] = math.log10(l_mm)
-
         y_cls[i] = curve_type
         y_alpha_log[i, 0] = alpha_log
         y_loss[i, 0] = loss_strength
@@ -121,7 +119,6 @@ class LFAMTLDataset(Dataset):
         self.v = torch.from_numpy(data["v"])
         self.t_log = torch.from_numpy(data["t_log"])
         self.l_log = torch.from_numpy(data["l_log"])
-
         self.curve_type = torch.from_numpy(data["curve_type"])
         self.alpha_log = torch.from_numpy(data["alpha_log"])
         self.loss_strength = torch.from_numpy(data["loss_strength"])
@@ -144,7 +141,6 @@ class LFAMTLNet(nn.Module):
     def __init__(self, n_points: int, hidden: int = 256) -> None:
         super().__init__()
         in_dim = (2 * n_points) + 1
-
         self.backbone = nn.Sequential(
             nn.Linear(in_dim, hidden),
             nn.ReLU(),
@@ -155,8 +151,7 @@ class LFAMTLNet(nn.Module):
             nn.BatchNorm1d(hidden),
             nn.Dropout(0.1),
         )
-
-        self.class_head = nn.Linear(hidden, 3)   # Parker/Cowan/Cape
+        self.class_head = nn.Linear(hidden, 3)
         self.alpha_head = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Linear(hidden // 2, 1))
         self.loss_head = nn.Sequential(nn.Linear(hidden, hidden // 2), nn.ReLU(), nn.Linear(hidden // 2, 1))
 
@@ -194,8 +189,6 @@ def run_epoch(model, loader, optimizer, device):
 
         loss_cls = ce(out["curve_logits"], y_cls)
         loss_alpha = mse(out["alpha_log"], y_alpha)
-
-        # Heat-loss 보정항은 Parker(클래스0) 샘플에서는 학습 가중치 축소
         mask_non_parker = (y_cls != 0).float().unsqueeze(1)
         loss_loss = ((out["loss_strength"] - y_loss) ** 2 * mask_non_parker).sum() / (mask_non_parker.sum() + 1e-6)
 
@@ -206,15 +199,11 @@ def run_epoch(model, loader, optimizer, device):
             loss.backward()
             optimizer.step()
 
-        preds = out["curve_logits"].argmax(dim=1)
-        cls_correct += (preds == y_cls).sum().item()
+        cls_correct += (out["curve_logits"].argmax(dim=1) == y_cls).sum().item()
         total += y_cls.numel()
         loss_sum += float(loss.item()) * y_cls.shape[0]
 
-    return {
-        "loss": loss_sum / total,
-        "cls_acc": cls_correct / total,
-    }
+    return {"loss": loss_sum / total, "cls_acc": cls_correct / total}
 
 
 def evaluate_regression(model, loader, device):
@@ -223,13 +212,9 @@ def evaluate_regression(model, loader, device):
     with torch.no_grad():
         for batch in loader:
             out = model(batch["v"].to(device), batch["t_log"].to(device), batch["l_log"].to(device))
-            pred_log = out["alpha_log"].cpu().numpy()
-            true_log = batch["alpha_log"].cpu().numpy()
-
-            pred = 10 ** pred_log
-            true = 10 ** true_log
+            pred = 10 ** out["alpha_log"].cpu().numpy()
+            true = 10 ** batch["alpha_log"].cpu().numpy()
             abs_rel_alpha.append(np.abs(pred - true) / np.maximum(true, 1e-12))
-
     return float(np.mean(np.concatenate(abs_rel_alpha, axis=0)))
 
 
@@ -238,16 +223,18 @@ def main() -> None:
     parser.add_argument("--epochs", type=int, default=25)
     parser.add_argument("--n-samples", type=int, default=24000)
     parser.add_argument("--n-points", type=int, default=128)
-    args = parser.parse_args()
+    parser.add_argument("--train-ratio", type=float, default=0.8)
+    parser.add_argument("--save-history", type=str, default="history_mtl_heatloss.json")
+
+    # Jupyter/IPython에서도 안전하게 동작
+    args, _unknown = parser.parse_known_args()
 
     cfg = SynthConfig(n_samples=args.n_samples, n_points=args.n_points)
     data = make_dataset(cfg)
     ds = LFAMTLDataset(data)
 
-    n_total = len(ds)
-    n_train = int(n_total * 0.8)
-    n_val = n_total - n_train
-    train_ds, val_ds = random_split(ds, [n_train, n_val], generator=torch.Generator().manual_seed(SEED))
+    n_train = int(len(ds) * args.train_ratio)
+    train_ds, val_ds = random_split(ds, [n_train, len(ds) - n_train], generator=torch.Generator().manual_seed(SEED))
 
     train_loader = DataLoader(train_ds, batch_size=256, shuffle=True, num_workers=0)
     val_loader = DataLoader(val_ds, batch_size=512, shuffle=False, num_workers=0)
@@ -256,20 +243,28 @@ def main() -> None:
     model = LFAMTLNet(cfg.n_points).to(device)
     optim = torch.optim.AdamW(model.parameters(), lr=2e-3, weight_decay=1e-4)
 
-    best_val = float("inf")
-    best_path = "best_mtl_heatloss.pt"
+    best_val, best_path = float("inf"), "best_mtl_heatloss.pt"
+    history = []
 
-    print(f"device={device}, train={n_train}, val={n_val}")
+    print(f"Starting training on {device}...")
     for epoch in range(1, args.epochs + 1):
-        tr = run_epoch(model, train_loader, optimizer=optim, device=device)
-        va = run_epoch(model, val_loader, optimizer=None, device=device)
-        mape = evaluate_regression(model, val_loader, device=device)
+        tr = run_epoch(model, train_loader, optim, device)
+        va = run_epoch(model, val_loader, None, device)
+        mape = evaluate_regression(model, val_loader, device)
+
+        row = {
+            "epoch": epoch,
+            "train_loss": tr["loss"],
+            "train_cls_acc": tr["cls_acc"],
+            "val_loss": va["loss"],
+            "val_cls_acc": va["cls_acc"],
+            "val_alpha_mape": mape,
+        }
+        history.append(row)
 
         print(
-            f"epoch={epoch:02d} "
-            f"train_loss={tr['loss']:.4f} train_cls_acc={tr['cls_acc']:.3f} "
-            f"val_loss={va['loss']:.4f} val_cls_acc={va['cls_acc']:.3f} "
-            f"val_alpha_mape={mape:.3f}",
+            f"Epoch {epoch:02d} | Train Loss: {tr['loss']:.4f} | "
+            f"Val Acc: {va['cls_acc']:.3f} | Alpha MAPE: {mape:.3f}",
             flush=True,
         )
 
@@ -277,7 +272,9 @@ def main() -> None:
             best_val = va["loss"]
             torch.save(model.state_dict(), best_path)
 
-    print(f"best model saved: {best_path}")
+    Path(args.save_history).write_text(json.dumps(history, indent=2), encoding="utf-8")
+    print(f"Training complete. Best model saved to: {best_path}")
+    print(f"History saved to: {args.save_history}")
 
 
 if __name__ == "__main__":

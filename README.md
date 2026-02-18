@@ -13,23 +13,49 @@ PyTorch 기반 Laser Flash Analysis(LFA) 실험 코드입니다.
 입력은 `(V(t), log10(t), log10(L))`이며, 출력은
 `curve_type`, `alpha_log`, `loss_strength` 입니다.
 
-### 실행
+### 학습 실행
 
 ```bash
 uv run python mtl_heatloss_pytorch.py --epochs 25 --n-samples 24000 --n-points 128
 ```
 
-빠른 검증은 아래처럼 실행할 수 있습니다.
+빠른 검증:
 
 ```bash
 uv run python mtl_heatloss_pytorch.py --epochs 3 --n-samples 4000 --n-points 96
 ```
 
-학습이 끝나면 최고 검증 성능 모델을 `best_mtl_heatloss.pt`로 저장합니다.
+- Jupyter/IPython에서도 `parse_known_args()`로 실행 가능
+- 학습 로그는 `history_mtl_heatloss.json`
+- 최고 모델은 `best_mtl_heatloss.pt`
 
-## 참고
+## 진단(성능 + 데이터 밸런스 + 차원 리스크)
 
-- Cowan / Cape-Lehman은 문헌의 완전한 폐형식 해를 직접 구현하기보다,
-  연구용 파이프라인 검증을 위해 **물리적으로 타당한 surrogate 생성기**로 구현했습니다.
-- 실제 논문용 최종 모델에서는 실험 장비/샘플 조건(방사율, Biot 수, 펄스폭, 두께 편차 등)에 맞춘
-  정식 해석식/수치해석 기반 데이터 생성기로 교체하는 것을 권장합니다.
+`goal2_diagnostics.py`는 아래를 자동 계산합니다.
+
+1. **데이터 밸런스**
+   - 클래스 카운트
+   - 클래스 균형 비율(min/max)
+   - `alpha_log`, `l_log` 히스토그램 CV
+2. **차원성 리스크(차원의 저주 점검)**
+   - 샘플/피처 비율
+   - PCA 95% 누적 분산 필요 차원
+   - Effective rank
+3. **검증 성능**
+   - Accuracy, Macro-F1, Confusion Matrix
+   - Alpha MAPE(mean/median/p90)
+
+실행:
+
+```bash
+uv run python goal2_diagnostics.py --n-samples 6000 --n-points 128 --checkpoint best_mtl_heatloss.pt
+```
+
+결과는 `goal2_diagnostic_report.json`로 저장됩니다.
+
+## 연구 단계 권장 로드맵
+
+1. Surrogate(Cowan-like/Cape-like)로 파이프라인 안정화
+2. 실제 Cowan/Cape 해석식/수치해석 데이터 생성기로 교체
+3. 실험 raw 시계열(장비/시편별)로 파인튜닝 + 외부 검증셋 분리
+4. 논문 지표: per-material, per-thickness, per-temperature stratified error 보고
